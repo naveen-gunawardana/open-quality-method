@@ -58,7 +58,7 @@ export function sanitizeAnalytics(value: unknown) {
   return {
     run_id: v.run_id, event: v.event as AnalyticsEvent,
     mode: choice(v.mode, ["single", "ab"]) ?? "single", preset: choice(v.preset, PRESETS) ?? "custom",
-    settings: { method: r.method === "silent-tail" ? "silent-tail" : "legacy", encode: encodeSettings(r.encode),
+    settings: { ...(sanitizeHeadlineAssignment(v.headline ?? r.headline) ? { headline: sanitizeHeadlineAssignment(v.headline ?? r.headline) } : {}), method: r.method === "silent-tail" ? "silent-tail" : "legacy", encode: encodeSettings(r.encode),
       ...(sanitizeAttribution(v.attribution ?? r.attribution) ? { attribution: sanitizeAttribution(v.attribution ?? r.attribution) } : {}),
       patch: { enabled: Array.isArray(p.enabled) ? [...new Set(p.enabled.filter(x => PATCHES.includes(x)))].slice(0, 9) : [],
         inflate: number(p.inflate, 1000), dummySize: p.dummySize === null ? null : number(p.dummySize, 100000), trailingBytes: number(p.trailingBytes, 100000000) },
@@ -97,7 +97,7 @@ export function trackConversion(run: TrackedRun, event: AnalyticsEvent, preset: 
   try {
     const info = run.result?.info;
     const payload = sanitizeAnalytics({ run_id: run.analyticsId, event, mode: run.comparisonEncode ? "ab" : "single", preset,
-      settings: run.recipe, shared_encode: run.comparisonEncode, attribution: currentAttribution(),
+      settings: run.recipe, headline: exposedHeadline(), shared_encode: run.comparisonEncode, attribution: currentAttribution(),
       source: { container: run.file.name.split(".").pop()?.toLowerCase(), size_mb: Math.round(run.file.size / 1048576 * 10) / 10 },
       result: info ? { ...info, codec: /^(avc|h264)/i.test(info.codec) ? "avc" : /^(hev|hvc|h265)/i.test(info.codec) ? "hevc" : /^(vp09|vp9)/i.test(info.codec) ? "vp9" : /^(av01|av1)/i.test(info.codec) ? "av1" : "other",
         size_mb: Math.round(run.result!.blob.size / 1048576 * 10) / 10,
@@ -106,4 +106,57 @@ export function trackConversion(run: TrackedRun, event: AnalyticsEvent, preset: 
     if (!payload) return;
     void fetch("/api/analytics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), keepalive: true }).catch(() => {});
   } catch {}
+}
+
+
+// Version the experiment whenever its wording or allocation changes. One equal arm per browser.
+export const HEADLINE_EXPERIMENT = "hero-headline-v1";
+export const HEADLINE_VARIANTS = [
+  ["Stop TikTok from", "compressing your video."],
+  ["The first free 4K", "TikTok upload method."],
+  ["Your 4K video.", "Ready for TikTok."],
+  ["Upload to TikTok.", "Keep it in 4K."],
+  ["Better TikTok quality.", "Zero upload fees."],
+  ["4K TikTok uploads.", "A free method."],
+  ["Stop blurry uploads.", "Start with OQM."],
+  ["Your edits deserve", "better TikTok quality."],
+  ["1080p. 4K. 60 fps.", "One free upload method."],
+  ["A free upload method.", "Built for TikTok editors."],
+] as const;
+const HEADLINE_KEY = HEADLINE_EXPERIMENT;
+const EXPOSURE_KEY = `${HEADLINE_KEY}-exposed`;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+export type HeadlineAssignment = { experiment: typeof HEADLINE_EXPERIMENT; visitor: string; variant: number };
+export function sanitizeHeadlineAssignment(value: unknown): HeadlineAssignment | undefined {
+  const v = object(value);
+  if (v.experiment !== HEADLINE_EXPERIMENT || typeof v.visitor !== "string" || !UUID.test(v.visitor) ||
+    typeof v.variant !== "number" || !Number.isInteger(v.variant) || v.variant < 0 || v.variant >= HEADLINE_VARIANTS.length) return undefined;
+  return { experiment: HEADLINE_EXPERIMENT, visitor: v.visitor, variant: v.variant };
+}
+export function headlineAssignment(): HeadlineAssignment | undefined {
+  try {
+    const stored = sanitizeHeadlineAssignment(JSON.parse(localStorage.getItem(HEADLINE_KEY) ?? "null"));
+    if (stored) return stored;
+    // Rejection sampling keeps all ten arms equally likely.
+    const bytes = new Uint32Array(1);
+    do { crypto.getRandomValues(bytes); } while (bytes[0] >= 4294967290);
+    const value: HeadlineAssignment = { experiment: HEADLINE_EXPERIMENT, visitor: crypto.randomUUID(), variant: bytes[0] % HEADLINE_VARIANTS.length };
+    localStorage.setItem(HEADLINE_KEY, JSON.stringify(value));
+    return value;
+  } catch { return undefined; } // Storage disabled: control headline, excluded from the experiment.
+}
+let visibleHeadline: HeadlineAssignment | undefined;
+export function exposedHeadline(): HeadlineAssignment | undefined {
+  try { return visibleHeadline ?? sanitizeHeadlineAssignment(JSON.parse(localStorage.getItem(EXPOSURE_KEY) ?? "null")); }
+  catch { return undefined; }
+}
+export async function trackHeadlineExposure(assignment: HeadlineAssignment) {
+  visibleHeadline = assignment; // Attribute fast starts while the exposure request is still in flight.
+  try {
+    const previous = sanitizeHeadlineAssignment(JSON.parse(localStorage.getItem(EXPOSURE_KEY) ?? "null"));
+    if (previous?.visitor === assignment.visitor && previous.variant === assignment.variant) return;
+    const response = await fetch("/api/experiments/headline", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(assignment), keepalive: true });
+    if (response.ok) localStorage.setItem(EXPOSURE_KEY, JSON.stringify(assignment));
+  } catch {} // Never block the site; another visible visit can retry.
 }

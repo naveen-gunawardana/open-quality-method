@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { HEADLINE_VARIANTS, headlineAssignment, trackHeadlineExposure, type HeadlineAssignment } from "@/lib/conversion-analytics";
 import PatcherLink from "@/components/PatcherLink";
 import AlpineLandscape from "@/components/AlpineLandscape";
 import "./alpine-hero.css";
@@ -15,6 +16,27 @@ function Github() {
 export default function AlpineHero({ onReview, error }: {
   onReview: () => void; error: boolean;
 }) {
+  const [headline, setHeadline] = useState<HeadlineAssignment>();
+  const title = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    let active = true;
+    // Keep the control until analytics storage is ready; never run an unmeasurable test.
+    void fetch("/api/experiments/headline", { cache: "no-store" }).then(response => {
+      if (response.ok && active) setHeadline(headlineAssignment());
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    const node = title.current;
+    if (!node || !headline) return;
+    let visible = false;
+    const record = () => { if (visible && document.visibilityState === "visible") void trackHeadlineExposure(headline); };
+    const observer = new IntersectionObserver(([entry]) => { visible = entry.isIntersecting && entry.intersectionRatio >= 0.5; record(); }, { threshold: [0, 0.5] });
+    observer.observe(node);
+    document.addEventListener("visibilitychange", record);
+    return () => { observer.disconnect(); document.removeEventListener("visibilitychange", record); };
+  }, [headline]);
+  const copy = HEADLINE_VARIANTS[headline?.variant ?? 0];
   const scene = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -63,7 +85,7 @@ export default function AlpineHero({ onReview, error }: {
 
   return <section ref={scene} className="alpine-hero" aria-labelledby="home-title">
     <div className="alpine-hero-copy">
-      <h1 id="home-title">Stop TikTok from <span>compressing your video.</span></h1>
+      <h1 ref={title} id="home-title">{copy[0]} <span>{copy[1]}</span></h1>
       <p className="alpine-description">Upload <strong>1080p and 4K videos at 60 fps</strong>.<br />Patch in your browser, then post to TikTok.</p>
       <div className="alpine-actions">
         <PatcherLink className="sun-action alpine-start">Patch video for free <Arrow /></PatcherLink>

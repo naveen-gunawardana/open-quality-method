@@ -70,7 +70,7 @@ function MethodsAndPrivacy() {
     </div></section>
     <section className="story-block privacy-block" aria-labelledby="privacy-title"><div className="story-wrap story-split">
       <div><h2 id="privacy-title">Your video stays<br/>on your device.</h2><p className="story-lead">Your browser reads, patches and saves the file. OQM’s server never receives its contents or filename.</p>
-        <details className="analytics-details"><summary>What gets recorded?</summary><p>Conversion reports can include selected settings, format and size, output properties, timing, outcome, browser, operating system, country, referral campaign and a salted network hash. These analytics do not store raw IP addresses.</p></details></div>
+        <details className="analytics-details"><summary>What gets recorded?</summary><p>Conversion reports can include selected settings, format and size, output properties, timing, outcome, browser, operating system, country, referral campaign and a salted network hash. Headline testing records a random browser ID, the headline shown and whether that browser completes a patch. These analytics do not store raw IP addresses.</p></details></div>
       <figure className="device-figure"><div className="device-window"><header><i aria-hidden="true"/>Your browser</header><div className="device-flow"><span><EditStill/>Source file</span><i aria-hidden="true">→</i><span><TopicMark slug="patch"/>Patch</span><i aria-hidden="true">→</i><span><TopicMark slug="mov-to-mp4-for-tiktok"/>MP4 file</span></div></div><figcaption><TopicMark slug="patch"/> Separate report · conversion analytics</figcaption></figure>
     </div></section>
   </>;
