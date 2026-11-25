@@ -24,6 +24,7 @@ type Run = {
   status: "queued" | "running" | "done" | "error";
   stage?: Stage;
   result?: ConvertResult;
+  sourceCodec?: string;
   url?: string;
   error?: string;
 };
@@ -124,7 +125,7 @@ export default function Converter({
         const analyticsPreset = presetFor(run.recipe);
         trackConversion(run, "started", analyticsPreset);
         try {
-          const result = await convert(run.file, run.recipe, (stage) => update(run.id, { stage }), controller.signal);
+          const result = await convert(run.file, run.recipe, (stage) => update(run.id, { stage }), controller.signal, (codec) => { run.sourceCodec = codec; update(run.id, { sourceCodec: codec }); });
           if (closed.current || controller.signal.aborted) throw new OqmError("Stopped.");
           trackConversion({ ...run, result }, result.checks.every(c => c.ok || c.warn) ? "succeeded" : "check_failed", analyticsPreset, performance.now() - startedAt);
           update(run.id, { status: "done", result, url: URL.createObjectURL(result.blob) });
@@ -476,6 +477,7 @@ function RunCard({ run, showFile }: { run: Run; showFile: boolean }) {
             {formatSize(run.result.blob.size)}
             {run.result.info.reencoded ? "" : " · not re-encoded"}
           </div>
+          {run.result.fallback && <p className="run-meta" role="status">{run.result.fallback}</p>}
           <div className="run-row">
             <a className="sun-action" href={run.url} download={outName} onClick={() => trackConversion(run, "downloaded", presetFor(run.recipe))}>
               Download MP4

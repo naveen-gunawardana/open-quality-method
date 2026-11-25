@@ -2,6 +2,7 @@ import type { ConvertResult, Recipe } from "./oqm/pipeline";
 
 const EVENTS = ["started", "succeeded", "check_failed", "failed", "cancelled", "downloaded"] as const;
 export type AnalyticsEvent = typeof EVENTS[number];
+const SOURCE_CODECS = ["avc", "hevc", "vp9", "vp8", "av1", "prores", "unknown"];
 const PRESETS = ["silent-tail", "current", "1080p", "4k", "noreencode", "longgop", "videodecoy", "minimal", "control", "clean", "custom"];
 const PATCHES = ["faststart", "strip-free", "zero-times", "mvhd-unknown-duration", "video-elst-plus-one", "decoy-audio", "decoy-video", "clean-metadata", "trailing-pad"];
 const FAILURES = ["decode", "encode", "hdr", "input", "silent-tail", "other"];
@@ -63,10 +64,10 @@ export function sanitizeAnalytics(value: unknown) {
       patch: { enabled: Array.isArray(p.enabled) ? [...new Set(p.enabled.filter(x => PATCHES.includes(x)))].slice(0, 9) : [],
         inflate: number(p.inflate, 1000), dummySize: p.dummySize === null ? null : number(p.dummySize, 100000), trailingBytes: number(p.trailingBytes, 100000000) },
       ...((v.shared_encode ?? r.shared_encode) ? { shared_encode: encodeSettings(v.shared_encode ?? r.shared_encode) } : {}) },
-    source: { container: choice(source.container, ["mp4", "mov", "m4v", "webm", "mkv", "avi"]) ?? "other", size_mb: number(source.size_mb, 200000) },
+    source: { container: choice(source.container, ["mp4", "mov", "m4v", "webm", "mkv", "avi"]) ?? "other", size_mb: number(source.size_mb, 200000), codec: choice(source.codec, SOURCE_CODECS) },
     result: v.result ? { width: number(result.width, 32768), height: number(result.height, 32768), fps: number(result.fps, 1000),
       mbps: number(result.mbps, 10000), duration: number(result.duration, 604800), size_mb: number(result.size_mb, 200000),
-      codec: choice(result.codec, ["avc", "hevc", "vp9", "av1", "other"]), warnings: number(result.warnings, 1000), failed_checks: number(result.failed_checks, 1000) } : null,
+      codec: choice(result.codec, ["avc", "hevc", "vp9", "av1", "other"]), warnings: number(result.warnings, 1000), failed_checks: number(result.failed_checks, 1000), ...(result.fallback === true ? { fallback: true } : {}) } : null,
     elapsed_ms: number(v.elapsed_ms, 604800000) ?? null,
     failure_category: choice(v.failure_category, FAILURES) ?? null,
   };
@@ -91,16 +92,16 @@ export function analyticsRunId() {
   try { return crypto.randomUUID(); } catch { return ""; }
 }
 
-type TrackedRun = { analyticsId: string; file: File; recipe: Recipe; comparisonEncode?: Recipe["encode"]; result?: ConvertResult };
+type TrackedRun = { analyticsId: string; file: File; recipe: Recipe; comparisonEncode?: Recipe["encode"]; result?: ConvertResult; sourceCodec?: string };
 export function trackConversion(run: TrackedRun, event: AnalyticsEvent, preset: string, elapsed?: number, error?: unknown) {
   // Analytics is best effort and cannot block patching, counting or downloading.
   try {
     const info = run.result?.info;
     const payload = sanitizeAnalytics({ run_id: run.analyticsId, event, mode: run.comparisonEncode ? "ab" : "single", preset,
       settings: run.recipe, headline: exposedHeadline(), shared_encode: run.comparisonEncode, attribution: currentAttribution(),
-      source: { container: run.file.name.split(".").pop()?.toLowerCase(), size_mb: Math.round(run.file.size / 1048576 * 10) / 10 },
+      source: { container: run.file.name.split(".").pop()?.toLowerCase(), size_mb: Math.round(run.file.size / 1048576 * 10) / 10, codec: run.sourceCodec },
       result: info ? { ...info, codec: /^(avc|h264)/i.test(info.codec) ? "avc" : /^(hev|hvc|h265)/i.test(info.codec) ? "hevc" : /^(vp09|vp9)/i.test(info.codec) ? "vp9" : /^(av01|av1)/i.test(info.codec) ? "av1" : "other",
-        size_mb: Math.round(run.result!.blob.size / 1048576 * 10) / 10,
+        fallback: !!run.result!.fallback, size_mb: Math.round(run.result!.blob.size / 1048576 * 10) / 10,
         warnings: run.result!.checks.filter(c => !c.ok && c.warn).length, failed_checks: run.result!.checks.filter(c => !c.ok && !c.warn).length } : undefined,
       elapsed_ms: elapsed == null ? undefined : Math.round(elapsed), failure_category: error ? failureCategory(error) : undefined });
     if (!payload) return;

@@ -73,7 +73,15 @@ export function sameRecipe(a: Recipe, b: Recipe): boolean {
 
 export type Stage = { label: string; progress: number | null };
 
+/** Codecs an MP4 can keep as-is when this browser can't rebuild the video. */
+const KEEPABLE = ["avc", "hevc"];
+
+/** This machine lacks a decoder or encoder; the file itself may still be fine to patch. */
+class CannotReencode extends OqmError {}
+
 export type ConvertResult = {
+  /** Set when this machine couldn't re-encode, so the original video was kept. */
+  fallback?: string;
   blob: Blob;
   checks: Check[];
   applied: string[];
@@ -84,7 +92,7 @@ export type ConvertResult = {
 
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
 
-type Probe = { width: number; height: number; fps: number; duration: number; codec: string; packets: number; hasAudio: boolean; channels: number; mbps: number; hdr: boolean };
+type Probe = { videoCodec: string; width: number; height: number; fps: number; duration: number; codec: string; packets: number; hasAudio: boolean; channels: number; mbps: number; hdr: boolean };
 
 async function probe(blob: Blob): Promise<Probe> {
   const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
@@ -94,6 +102,7 @@ async function probe(blob: Blob): Promise<Probe> {
     const stats = await video.computePacketStats();
     const audio = await input.getPrimaryAudioTrack();
     return {
+      videoCodec: video.codec ?? "unknown",
       width: video.displayWidth,
       height: video.displayHeight,
       fps: stats.averagePacketRate,
@@ -155,11 +164,12 @@ export async function prepareInputDecoders(input: Input, onStage: (s: Stage) => 
   if (signal?.aborted) throw new OqmError("Stopped.");
   if (video && !(await video.canDecode())) {
     const codec = (await video.getCodecParameterString()) ?? video.codec ?? "unknown";
-    throw new OqmError(`This browser can't decode the video's ${codec} codec. MOV is a container; support depends on the codec inside it. Export an SDR H.264 MP4 with AAC audio, or use the desktop app.`);
+    const name = video.codec === "hevc" ? "HEVC / H.265" : video.codec === "avc" ? "H.264" : codec;
+    throw new CannotReencode(`This file contains ${name} video (${codec}), which this browser can't decode on this device. Export an SDR H.264 MP4 with AAC audio, try another browser, or use the desktop app.`);
   }
   const audio = await input.getPrimaryAudioTrack();
   if (audio && !(await audio.canDecode())) {
-    throw new OqmError(`This browser can't decode the ${audio.codec ?? "unknown"} audio. Export with AAC audio, or use the desktop app. Your audio hasn't been removed.`);
+    throw new CannotReencode(`This browser can't decode the ${audio.codec ?? "unknown"} audio. Export with AAC audio, or use the desktop app. Your audio hasn't been removed.`);
   }
 }
 
@@ -171,7 +181,7 @@ async function runConversion(conversion: Conversion, onStage: (s: Stage) => void
   const discarded = conversion.discardedTracks.filter((d) => d.track.type === "video" || d.track.type === "audio");
   if (!conversion.isValid || discarded.length) {
     const why = discarded.map((d) => `${d.track.type}: ${d.reason.replace(/_/g, " ")}`).join(", ");
-    throw new OqmError(`This browser can't convert that file (${why}). Export an SDR H.264 MP4 with AAC audio, or use the desktop app.`);
+    throw new CannotReencode(`This browser can't convert that file (${why}). Export an SDR H.264 MP4 with AAC audio, or use the desktop app.`);
   }
   const abort = () => void conversion.cancel().catch(() => {});
   signal?.addEventListener("abort", abort);
@@ -200,7 +210,7 @@ async function reencode(file: Blob, src: Probe, e: EncodeOptions, onStage: (s: S
 async function reencodeOnce(file: Blob, src: Probe, e: EncodeOptions, audioBps: number, onStage: (s: Stage) => void, signal?: AbortSignal, stereo = false) {
   if (src.hdr) throw new OqmError("HDR/wide-gamut re-encoding needs explicit colour conversion. Use an SDR master; test HDR separately.");
   if (typeof VideoEncoder === "undefined") {
-    throw new OqmError("This browser can't encode video. Use a recent Chrome, Edge or Safari, or turn off re-encode in the options.");
+    throw new CannotReencode("This browser can't encode video. Use a recent Chrome, Edge or Safari, or turn off re-encode in the options.");
   }
   const size = targetSize(src, e.size);
   const width = size.width ?? src.width;
@@ -209,7 +219,7 @@ async function reencodeOnce(file: Blob, src: Probe, e: EncodeOptions, audioBps: 
   const fps = frameRate ?? src.fps;
   const videoQuality = quality(e, width, height, fps);
   if (!(await canEncodeVideo(e.codec, { width, height, frameRate: fps, quality: videoQuality }))) {
-    throw new OqmError(`This browser can't encode ${e.codec === "hevc" ? "H.265" : "H.264"} at ${width}x${height}, ${fps.toFixed(2)} fps with these settings. Try Max 1080p or a lower bitrate.`);
+    throw new CannotReencode(`This browser can't encode ${e.codec === "hevc" ? "H.265" : "H.264"} at ${width}x${height}, ${fps.toFixed(2)} fps with these settings. Try Max 1080p or a lower bitrate.`);
   }
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target: new BufferTarget() });
@@ -258,22 +268,66 @@ async function remux(file: Blob, onStage: (s: Stage) => void, signal?: AbortSign
   return new Blob([output.target.buffer!], { type: "video/mp4" });
 }
 
+/** Keep the encoded video; keep AAC-LC stereo audio too, and convert any other audio to it. No video decoder needed. */
+async function keepVideo(file: Blob, audioKbps: number, onStage: (s: Stage) => void, signal?: AbortSignal) {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target: new BufferTarget() });
+  try {
+    const video = await input.getPrimaryVideoTrack();
+    const audio = await input.getPrimaryAudioTrack();
+    const ready = (await audio?.getCodecParameterString()) === "mp4a.40.2" && audio?.numberOfChannels === 2;
+    const conversion = await Conversion.init({
+      input, output, tracks: "primary", showWarnings: false, tags: () => ({}),
+      copy: { mode: "preferred", shiftTolerance: Infinity },
+      video: { codec: video?.codec ?? undefined },
+      audio: ready ? { codec: "aac" } : { codec: "aac", bitrate: audioBitrate(audioKbps, 2), sampleRate: 48000, numberOfChannels: 2, forceTranscode: true },
+    });
+    await runConversion(conversion, onStage, "Keeping your original video", signal);
+  } finally {
+    input.dispose();
+  }
+  return new Blob([output.target.buffer!], { type: "video/mp4" });
+}
+
+/** QuickTime files describe audio in a way silent-tail can't read; repackaging them as MP4 fixes that. */
+const isQuickTime = async (file: Blob) => new TextDecoder().decode(await file.slice(4, 12).arrayBuffer()) === "ftypqt  ";
+
 export async function convert(
   file: File,
   recipe: Recipe,
   onStage: (s: Stage) => void = () => {},
   signal?: AbortSignal,
+  onSource: (codec: string) => void = () => {},
 ): Promise<ConvertResult> {
   if (signal?.aborted) throw new OqmError("Stopped.");
   onStage({ label: "Reading your video", progress: null });
   const src = await probe(file);
   if (signal?.aborted) throw new OqmError("Stopped.");
 
+  onSource(src.videoCodec);
   // Say so before a long encode; silent-tail has nothing to extend.
   if (recipe.method === "silent-tail" && !src.hasAudio) throw new OqmError("This video has no audio track, and silent-tail needs one. Add any audio (silence works) in your editor and export again.");
 
   let base: Blob = file;
-  if (recipe.encode.reencode) base = await reencode(file, src, recipe.encode, onStage, signal, recipe.method === "silent-tail");
+  let fallback: string | undefined;
+  const silent = recipe.method === "silent-tail";
+  if (recipe.encode.reencode) {
+    try {
+      base = await reencode(file, src, recipe.encode, onStage, signal, silent);
+    } catch (error) {
+      // Codec support differs by browser, OS and GPU. Patching doesn't need it, so keep the video instead of stopping.
+      const machine = error instanceof CannotReencode || (!(error instanceof OqmError) && /decod|encod|codec/i.test(String(error)));
+      if (signal?.aborted || !silent || !machine || !KEEPABLE.includes(src.videoCodec)) throw error;
+      try {
+        base = await keepVideo(file, recipe.encode.audioKbps, onStage, signal);
+      } catch {
+        throw signal?.aborted ? new OqmError("Stopped.") : error;
+      }
+      const e = recipe.encode, fps = targetFrameRate(src.fps, e.fps);
+      const lost = [targetSize(src, e.size).width && "resolution", fps && Math.abs(fps - src.fps) > 0.01 && "frame rate"].filter(Boolean).join(" and ");
+      fallback = `This device couldn't re-encode this ${src.videoCodec === "hevc" ? "HEVC" : "H.264"} video, so OQM kept your original video and patched that.${lost ? ` Your ${lost} setting wasn't applied.` : ""}`;
+    }
+  } else if (silent && (await isQuickTime(file))) base = await keepVideo(file, recipe.encode.audioKbps, onStage, signal);
   else if (!(await isPatchReady(file))) base = await remux(file, onStage, signal);
   if (signal?.aborted) throw new OqmError("Stopped.");
 
@@ -303,6 +357,7 @@ export async function convert(
   checks.push({ name: "Audio track preserved", ok: after.hasAudio === before.hasAudio, detail: before.hasAudio ? "audio present" : "source has no audio" });
   return {
     ...result,
+    fallback,
     checks,
     info: {
       width: after.width,
@@ -311,7 +366,7 @@ export async function convert(
       codec: after.codec,
       mbps: after.mbps,
       duration: after.duration,
-      reencoded: recipe.encode.reencode,
+      reencoded: recipe.encode.reencode && !fallback,
     },
   };
 }

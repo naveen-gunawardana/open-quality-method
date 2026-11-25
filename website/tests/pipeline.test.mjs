@@ -94,6 +94,45 @@ test("a video without audio is refused before encoding with a clear message", as
   await assert.rejects(convert(new File([await readFile(source)], "mute.mp4"), DEFAULT_RECIPE), /no audio track/);
 });
 
+test("sources this machine can't re-encode keep their original video and still get patched", async () => {
+  // Node has no video codecs, like a machine without HEVC support.
+  for (const [codec, tag, ext, audio] of [["libx265", "hvc1", "mp4", "aac"], ["libx265", "hev1", "mp4", "aac"], ["libx265", "hvc1", "mov", "aac"], ["libx264", "avc1", "mp4", "aac"], ["libx264", "avc1", "mov", "aac"]]) {
+    const source = path.join(dir, `keep-${tag}.${ext}`);
+    const made = spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x568:r=60:d=1", "-f", "lavfi", "-i", "sine=sample_rate=48000:d=1",
+      "-ac", "2", "-c:v", codec, ...(codec === "libx265" ? ["-x265-params", "log-level=error"] : []), "-tag:v", tag, "-pix_fmt", "yuv420p", "-c:a", audio, "-shortest", source]);
+    assert.equal(made.status, 0, made.stderr?.toString());
+    const file = new File([await readFile(source)], `clip.${ext}`);
+    const name = `${tag} ${ext}`;
+    const codecs = [];
+    const result = await convert(file, { ...DEFAULT_RECIPE, encode: { ...DEFAULT_RECIPE.encode, size: "short-720", fps: 30 } }, () => {}, undefined, c => codecs.push(c));
+    assert.deepEqual(codecs, [codec === "libx265" ? "hevc" : "avc"], name);
+    assert.match(result.fallback, /kept your original video.*Your frame rate setting wasn't applied/, name);
+    assert.equal(result.info.reencoded, false);
+    assert.deepEqual(result.checks.filter(c => !c.ok && !c.warn), [], name);
+    const out = path.join(dir, `out-${tag}-${ext}.mp4`);
+    await writeFile(out, Buffer.from(await result.blob.arrayBuffer()));
+    const hash = f => spawnSync("ffmpeg", ["-v", "error", "-i", f, "-map", "0:v:0", "-f", "md5", "-"]).stdout.toString();
+    assert.ok(hash(source).startsWith("MD5="));
+    assert.equal(hash(out), hash(source), `${name}: every decoded frame is identical`);
+    const plain = await convert(file, { ...DEFAULT_RECIPE, encode: { ...DEFAULT_RECIPE.encode, reencode: false } });
+    assert.equal(plain.fallback, undefined);
+    assert.deepEqual(plain.checks.filter(c => !c.ok && !c.warn), [], `${name} without re-encode`);
+  }
+});
+
+test("a rotated phone clip stays upright when its original video is kept", async () => {
+  const flat = path.join(dir, "flat.mp4"), source = path.join(dir, "rotated.mov"), out = path.join(dir, "rotated-out.mp4");
+  assert.equal(spawnSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=1", "-f", "lavfi", "-i", "sine=sample_rate=48000:d=1", "-ac", "2",
+    "-c:v", "libx265", "-x265-params", "log-level=error", "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", flat]).status, 0);
+  assert.equal(spawnSync("ffmpeg", ["-v", "error", "-display_rotation", "90", "-i", flat, "-c", "copy", source]).status, 0);
+  const result = await convert(new File([await readFile(source)], "rotated.mov"), DEFAULT_RECIPE);
+  assert.ok(result.fallback);
+  assert.deepEqual([result.info.width, result.info.height], [180, 320]);
+  await writeFile(out, Buffer.from(await result.blob.arrayBuffer()));
+  const rotation = f => spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream_side_data=rotation", "-of", "csv=p=0", f]).stdout.toString().trim();
+  assert.equal(rotation(out), rotation(source));
+});
+
 // Decode real ProRes + PCM data with the production registration path, not a mocked browser codec.
 test("ProRes MOV loads its decoder on demand and preserves decodable PCM audio", async () => {
   const { Input, BlobSource, ALL_FORMATS, VideoSampleSink, AudioSampleSink } = await import("mediabunny");

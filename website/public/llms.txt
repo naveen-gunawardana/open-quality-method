@@ -14,7 +14,7 @@
 
 ## What the website does
 
-Users select a video, choose settings and press Start. Selecting a file does not automatically convert it. Supported inputs include MP4 and supported MOV codecs; ProRes MOV decoding is available through a local software decoder. Browser and device codec support varies.
+Users select a video, choose settings and press Start. Selecting a file does not automatically convert it. Supported inputs include MP4 and supported MOV codecs; ProRes MOV decoding is available through a local software decoder. Browser and device codec support varies; when an H.264 or HEVC source cannot be re-encoded on a device, the original video is kept and patched.
 
 The default is silent-tail with re-encoding enabled: prepare H.264 video and AAC stereo audio, then append a short silent AAC audio tail and duplicate the audio track. Silent-tail is experimental. It is the only method on the website. Users can still change re-encoding, resolution, frame rate, audio bitrate and encoding settings.
 

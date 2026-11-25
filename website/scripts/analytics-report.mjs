@@ -21,6 +21,8 @@ console.log(JSON.stringify({ since, asOf: new Date().toISOString(), events: even
   methods: tally(started, r => r.settings.method), reencode: tally(started, r => String((r.settings.shared_encode ?? r.settings.encode).reencode)),
   formats: tally(started, r => r.source.container), browsers: tally(started, r => r.browser), operatingSystems: tally(started, r => r.os),
   countries: tally(started, r => r.country ?? 'unknown'), failureCategories: tally(finished.filter(r=>r.failure_category),r=>r.failure_category),
+  failuresByCodecBrowserOs: tally(finished.filter(r => r.event === 'failed'), r => [r.failure_category, r.source.codec ?? 'unknown', r.browser, r.os].join(' / ')),
+  keptOriginalByCodecBrowserOs: tally(finished.filter(r => r.result?.fallback), r => [r.source.codec ?? 'unknown', r.browser, r.os].join(' / ')),
   campaignSources: tally(started, r => r.settings.attribution?.source ?? 'untagged'),
   campaignSuccesses: tally(finished.filter(r => r.event === 'succeeded'), r => r.settings.attribution?.source ?? 'untagged'),
   campaignContent: tally(started, r => r.settings.attribution?.content ?? 'untagged'),
