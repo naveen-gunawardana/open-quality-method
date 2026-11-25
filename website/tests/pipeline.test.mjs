@@ -22,8 +22,8 @@ for (const name of ["patch", "silentTail", "pipeline"]) {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText);
 }
-const { sameRecipe, prepareInputDecoders, convert, prepareComparison, targetSize, targetFrameRate, COMPARISON_PRESETS, DEFAULT_RECIPE, PRESETS } = await import(pathToFileURL(path.join(dir, "pipeline.mjs")));
-test("latest standalone UI exposes the experimental option before selecting a video", async () => {
+const { sameRecipe, prepareInputDecoders, convert, targetSize, targetFrameRate, DEFAULT_RECIPE } = await import(pathToFileURL(path.join(dir, "pipeline.mjs")));
+test("the patcher offers only silent-tail and keeps the basic options", async () => {
   for (const name of ["SettingHelp", "EditFigures"]) {
     const component = await readFile(new URL(`../src/components/${name}.tsx`, import.meta.url), "utf8");
     await writeFile(path.join(dir, `${name}.mjs`), ts.transpileModule(component, {
@@ -42,14 +42,10 @@ test("latest standalone UI exposes the experimental option before selecting a vi
   const { default: Converter } = await import(pathToFileURL(path.join(dir, "Converter.mjs")));
   const html = renderToStaticMarkup(createElement(Converter, { standalone: true }));
   assert.match(html, /role="region"/);
-  const presetSelect = html.match(/<label>Preset(<select>.*?<\/select>)<\/label>/)?.[1];
-  assert.ok(presetSelect, "Preset settings are available before choosing a video");
-  assert.match(presetSelect, /<option value="silent-tail" selected="">Silent-tail \(default\)<\/option>/);
-  assert.match(presetSelect, /<option value="current">Original OQM<\/option>/);
-  assert.match(presetSelect, /<option value="1080p">1080p — high quality<\/option>/);
-  assert.match(presetSelect, /<option value="4k">4K — high quality<\/option>/);
-  assert.equal((presetSelect.match(/selected=""/g) ?? []).length, 1);
-  assert.match(html, /<button[^>]*disabled=""[^>]*>Make local comparison \(3\)<\/button>/);
+  for (const id of ["size", "fps", "audio"]) assert.match(html, new RegExp(`<select id="setting-${id}"`), "basic option kept: " + id);
+  assert.match(html, /Re-encode before patching/);
+  assert.match(html, /Silent-tail/);
+  assert.doesNotMatch(html, /<label>Preset|Original OQM|Container patches|Decoy|Make local comparison/);
   assert.match(html, /<button[^>]*disabled=""[^>]*>Start patching<svg/);
   const selected = renderToStaticMarkup(createElement(Converter, {
     standalone: true, file: new File(["test"], "selected-test.mp4", { type: "video/mp4" }),
@@ -60,56 +56,42 @@ test("latest standalone UI exposes the experimental option before selecting a vi
   assert.doesNotMatch(selected.match(/<button[^>]*>Start patching<svg/)?.[0] ?? "", /disabled/);
   assert.doesNotMatch(selected, /Start again|run-running|Working…|studio-upload/);
 });
-test("resolution presets downscale in both orientations without upscaling or changing the default", () => {
-  const hd = PRESETS.find(p => p.id === "1080p").recipe;
-  const uhd = PRESETS.find(p => p.id === "4k").recipe;
-  assert.deepEqual(targetSize({ width: 3840, height: 2160 }, hd.encode.size), { width: 1920, height: 1080 });
-  assert.deepEqual(targetSize({ width: 2160, height: 3840 }, hd.encode.size), { width: 1080, height: 1920 });
-  assert.deepEqual(targetSize({ width: 7680, height: 4320 }, uhd.encode.size), { width: 3840, height: 2160 });
-  assert.deepEqual(targetSize({ width: 4320, height: 7680 }, uhd.encode.size), { width: 2160, height: 3840 });
-  assert.deepEqual(targetSize({ width: 1920, height: 1080 }, uhd.encode.size), {});
-  assert.deepEqual(targetSize({ width: 1280, height: 720 }, hd.encode.size), {});
-  for (const recipe of [hd, uhd]) {
-    assert.equal(recipe.encode.codec, "avc");
-    assert.equal(recipe.encode.reencode, true);
-    assert.equal(recipe.encode.rate, "bitrate");
-    assert.equal(recipe.encode.keyframeSec, 2);
-    assert.equal(recipe.encode.audioKbps, 320);
-    assert.equal(recipe.method, "silent-tail");
-    assert.deepEqual(recipe.patch.enabled, [], "resolution presets must not stack the original patches on silent-tail");
-    for (const fps of [24, 29.97, 30, 59.94, 60]) assert.equal(targetFrameRate(fps, recipe.encode.fps), undefined);
-    for (const fps of [90, 120]) assert.equal(targetFrameRate(fps, recipe.encode.fps), 60);
-  }
-  assert.equal(hd.encode.mbps, 20);
-  assert.equal(uhd.encode.mbps, 60);
+test("resolution limits downscale in both orientations without upscaling", () => {
+  assert.deepEqual(targetSize({ width: 3840, height: 2160 }, "short-1080"), { width: 1920, height: 1080 });
+  assert.deepEqual(targetSize({ width: 2160, height: 3840 }, "short-1080"), { width: 1080, height: 1920 });
+  assert.deepEqual(targetSize({ width: 7680, height: 4320 }, "short-2160"), { width: 3840, height: 2160 });
+  assert.deepEqual(targetSize({ width: 4320, height: 7680 }, "short-2160"), { width: 2160, height: 3840 });
+  assert.deepEqual(targetSize({ width: 1920, height: 1080 }, "short-2160"), {});
+  assert.deepEqual(targetSize({ width: 1280, height: 720 }, "short-1080"), {});
+  for (const fps of [24, 29.97, 30, 59.94, 60]) assert.equal(targetFrameRate(fps, "source-max-60"), undefined);
+  for (const fps of [90, 120]) assert.equal(targetFrameRate(fps, "source-max-60"), 60);
   assert.equal(targetFrameRate(120, null), undefined);
   assert.equal(targetFrameRate(24, 60), 60);
-  assert.equal(PRESETS[0].recipe, DEFAULT_RECIPE);
 });
-test("comparison prepares one shared MP4 and reads back all three methods", async () => {
+test("silent-tail patches a compatible MP4 without re-encoding", async () => {
   const source = path.join(dir, "source.mp4");
   const made = spawnSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x568:r=60:d=0.5",
     "-f", "lavfi", "-i", "sine=sample_rate=48000:d=0.5", "-ac", "2", "-c:v", "libx264", "-preset", "ultrafast",
     "-c:a", "aac", "-shortest", "-movflags", "+faststart", source]);
   assert.equal(made.status, 0, made.stderr?.toString());
-  const base = await prepareComparison(new File([await readFile(source)], "source.mp4"), { ...DEFAULT_RECIPE.encode, reencode: false }, () => {});
-  for (const arm of COMPARISON_PRESETS) {
-    const result = await convert(base, arm.recipe);
-    assert.deepEqual(result.checks.filter(c => !c.ok && !c.warn), [], arm.title);
-    assert.equal(result.info.width, 320);
-    assert.equal(result.info.height, 568);
-    assert.ok(Math.abs(result.info.fps - 60) < 0.01, `${arm.title}: ${result.info.fps}`);
-    assert.equal(result.info.reencoded, false);
-    assert.ok(result.info.mbps > 0);
-  }
-  assert.equal(PRESETS[0].recipe, DEFAULT_RECIPE);
+  const result = await convert(new File([await readFile(source)], "source.mp4"),
+    { ...DEFAULT_RECIPE, encode: { ...DEFAULT_RECIPE.encode, reencode: false } });
+  assert.deepEqual(result.checks.filter(c => !c.ok && !c.warn), []);
+  assert.equal(result.info.width, 320);
+  assert.equal(result.info.height, 568);
+  assert.ok(Math.abs(result.info.fps - 60) < 0.01, String(result.info.fps));
+  assert.equal(result.info.reencoded, false);
   assert.equal(DEFAULT_RECIPE.method, "silent-tail");
   assert.equal(DEFAULT_RECIPE.encode.reencode, true);
   assert.equal(DEFAULT_RECIPE.encode.codec, "avc");
   assert.deepEqual(DEFAULT_RECIPE.patch.enabled, []);
-  const original = PRESETS.find(p => p.id === "current").recipe;
-  assert.notEqual(original.method, "silent-tail");
-  assert.ok(original.patch.enabled.includes("decoy-audio"));
+});
+
+test("a video without audio is refused before encoding with a clear message", async () => {
+  const source = path.join(dir, "mute.mp4");
+  const made = spawnSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=128x72:r=30:d=0.2", "-c:v", "libx264", "-pix_fmt", "yuv420p", source]);
+  assert.equal(made.status, 0, made.stderr?.toString());
+  await assert.rejects(convert(new File([await readFile(source)], "mute.mp4"), DEFAULT_RECIPE), /no audio track/);
 });
 
 // Decode real ProRes + PCM data with the production registration path, not a mocked browser codec.
@@ -146,21 +128,20 @@ test("ProRes MOV loads its decoder on demand and preserves decodable PCM audio",
   } finally { input.dispose(); }
 });
 
-test("saved silent-tail defaults match the preset regardless of property order and unused settings", () => {
+test("saved silent-tail defaults match the default regardless of property order and unused settings", () => {
   // This is the exact object order produced by loadRecipe after localStorage is read.
   const saved = JSON.parse(JSON.stringify(DEFAULT_RECIPE));
   const restored = { encode: { ...DEFAULT_RECIPE.encode, ...saved.encode }, patch: saved.patch, method: saved.method };
   assert.notEqual(JSON.stringify(restored), JSON.stringify(DEFAULT_RECIPE));
   assert.equal(sameRecipe(DEFAULT_RECIPE, restored), true);
-  assert.equal(PRESETS.find(p => sameRecipe(p.recipe, restored))?.id, "silent-tail");
   // Earlier silent-tail settings retained legacy patch toggles; those are never applied by silent-tail.
-  const stale = { ...restored, patch: PRESETS.find(p => p.id === "current").recipe.patch,
+  const stale = { ...restored, patch: { ...restored.patch, enabled: ["faststart", "decoy-audio"] },
     encode: { ...restored.encode, mbps: 60 } }; // Bitrate is inactive in quantizer mode.
-  assert.equal(PRESETS.find(p => sameRecipe(p.recipe, stale))?.id, "silent-tail");
+  assert.equal(sameRecipe(DEFAULT_RECIPE, stale), true);
   assert.equal(sameRecipe(DEFAULT_RECIPE, { ...restored, encode: { ...restored.encode, fps: 30 } }), false);
   assert.equal(sameRecipe(DEFAULT_RECIPE, { ...restored, encode: { ...restored.encode, quantizer: 23 } }), false);
   assert.equal(sameRecipe(DEFAULT_RECIPE, { ...restored, encode: { ...restored.encode, reencode: false } }), false);
   assert.equal(sameRecipe(DEFAULT_RECIPE, { ...restored, method: "legacy" }), false);
-  const original = PRESETS.find(p => p.id === "current").recipe;
+  const original = { ...restored, method: "legacy", patch: { ...restored.patch, enabled: ["faststart", "decoy-audio"] } };
   assert.equal(sameRecipe(original, { patch: { ...original.patch, enabled: [...original.patch.enabled].reverse() }, encode: { ...original.encode }, method: "legacy" }), true);
 });

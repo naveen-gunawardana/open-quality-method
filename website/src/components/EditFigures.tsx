@@ -31,13 +31,11 @@ export function TopicMark({ slug }: { slug: string }) {
   return <svg className="topic-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true"><path d={paths[slug]} /></svg>;
 }
 
-export function MethodBranches() {
+export function MethodTimeline() {
   return <figure className="method-map">
-    <div className="map-origin"><EditStill /><strong>One prepared source</strong></div>
-    <ul>{["Clean MP4", "Original OQM", "Silent-tail"].map((label,i)=><li key={label}>
-      <EditStill /><span>{label}</span><span className={`track-pair${i === 2 ? " has-tail" : ""}`} aria-hidden="true"><i/><i/></span>
-    </li>)}</ul>
-    <figcaption>Each output uses the same encoded video. Silent-tail adds a short audio tail.</figcaption>
+    <div className="map-origin"><EditStill /><strong>Prepared MP4</strong></div>
+    <ul><li><EditStill /><span>Silent-tail</span><span className="track-pair has-tail" aria-hidden="true"><i/><i/></span></li></ul>
+    <figcaption>The encoded video stays the same. Silent-tail adds a short audio tail.</figcaption>
   </figure>;
 }
 

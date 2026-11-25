@@ -71,7 +71,7 @@ assert.ok(feed.response.headers.get('content-type')?.includes('application/rss+x
 assert.equal((feed.text.match(/<item>/g)??[]).length,8);
 const worksheet=await get('/resources/tiktok-upload-test.csv');
 assert.match(worksheet.response.headers.get('content-disposition')??'',/attachment/);
-assert.equal(worksheet.text.trim().split(/\r?\n/).length,13);
+assert.equal(worksheet.text.trim().split(/\r?\n/).length,9);
 const home=(await get('/')).text;
 for(const id of ['how-it-works','presets','editor-guides','faq-title'])assert.ok(home.includes(`id="${id}"`),'home section: '+id);
 assert.ok(home.includes('href="/guides"'),'crawlable home-to-guides link');

@@ -13,7 +13,7 @@ import {
   Quality,
   canEncodeVideo,
 } from "mediabunny";
-import { ALL_PATCHES, DEFAULT_PATCH, OqmError, REFERENCE, isPatchReady, patchVideo, type Check, type PatchOptions } from "./patch";
+import { DEFAULT_PATCH, OqmError, isPatchReady, patchVideo, type Check, type PatchOptions } from "./patch";
 
 import { silentTail } from "./silentTail";
 
@@ -70,30 +70,6 @@ export function sameRecipe(a: Recipe, b: Recipe): boolean {
   return keys.every(key => a.patch[key] === b.patch[key])
     && JSON.stringify([...new Set(a.patch.enabled)].sort()) === JSON.stringify([...new Set(b.patch.enabled)].sort());
 }
-
-export type Preset = { id: string; title: string; desc: string; recipe: Recipe };
-
-const withPatches = (enabled: PatchOptions["enabled"], encode: Partial<EncodeOptions> = {}): Recipe => ({
-  encode: { ...DEFAULT_ENCODE, ...encode },
-  patch: { ...DEFAULT_PATCH, enabled },
-});
-
-const withSilentTail = (encode: Partial<EncodeOptions>): Recipe => ({
-  ...withPatches([], encode), method: "silent-tail",
-});
-
-/** Independent options. The controlled comparison below uses only three shared-source arms. */
-export const PRESETS: Preset[] = [
-  { id: "silent-tail", title: "Silent-tail (default)", desc: "Re-encodes to H.264/AAC stereo, then adds a short silent audio tail and a second audio track. Experimental; TikTok quality and retention can vary.", recipe: DEFAULT_RECIPE },
-  { id: "current", title: "Original OQM", desc: "Clean H.264 re-encode (quality 17) + the original full patch set. The previous website default and desktop method.", recipe: withPatches(REFERENCE) },
-  { id: "1080p", title: "1080p — high quality", desc: "H.264 at a target 20 Mbps, up to 1080p and 60 fps, AAC audio. Keeps lower source frame rates and dimensions. Uses the default silent-tail method with AAC stereo. TikTok results can vary.", recipe: withSilentTail({ reencode: true, rate: "bitrate", mbps: 20, size: "short-1080", fps: "source-max-60" }) },
-  { id: "4k", title: "4K — high quality", desc: "Uses the default silent-tail method. H.264 at a target 60 Mbps, up to 4K (2160p) and 60 fps, AAC stereo. Use a 4K SDR source and a capable browser/device; smaller inputs stay smaller. TikTok results can vary.", recipe: withSilentTail({ reencode: true, rate: "bitrate", mbps: 60, size: "short-2160", fps: "source-max-60" }) },
-  { id: "noreencode", title: "No re-encode", desc: "Your video and audio are kept exactly as they are; only the container is patched.", recipe: withPatches(REFERENCE, { reencode: false }) },
-  { id: "longgop", title: "Long keyframe gap", desc: "Re-encode with one keyframe at the start, like the public reference tool, + full patch set.", recipe: withPatches(REFERENCE, { keyframeSec: 0 }) },
-  { id: "videodecoy", title: "Full patch + video decoy", desc: "Current patches plus a hidden duplicate video track. Experimental; differs from NoBlur's primary-track inflation.", recipe: withPatches(ALL_PATCHES) },
-  { id: "minimal", title: "Decoy only", desc: "Re-encode + just the decoy audio track. Shows whether the other patches matter.", recipe: withPatches(["faststart", "decoy-audio"]) },
-  { id: "control", title: "Control: no patch", desc: "Same re-encode, normal container. If this does as well as the others, the patch isn't doing anything.", recipe: withPatches(["faststart"]) },
-];
 
 export type Stage = { label: string; progress: number | null };
 
@@ -233,7 +209,7 @@ async function reencodeOnce(file: Blob, src: Probe, e: EncodeOptions, audioBps: 
   const fps = frameRate ?? src.fps;
   const videoQuality = quality(e, width, height, fps);
   if (!(await canEncodeVideo(e.codec, { width, height, frameRate: fps, quality: videoQuality }))) {
-    throw new OqmError(`This browser can't encode ${e.codec === "hevc" ? "H.265" : "H.264"} at ${width}x${height}, ${fps.toFixed(2)} fps with these settings. Try the 1080p preset or a lower bitrate.`);
+    throw new OqmError(`This browser can't encode ${e.codec === "hevc" ? "H.265" : "H.264"} at ${width}x${height}, ${fps.toFixed(2)} fps with these settings. Try Max 1080p or a lower bitrate.`);
   }
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target: new BufferTarget() });
@@ -293,6 +269,9 @@ export async function convert(
   const src = await probe(file);
   if (signal?.aborted) throw new OqmError("Stopped.");
 
+  // Say so before a long encode; silent-tail has nothing to extend.
+  if (recipe.method === "silent-tail" && !src.hasAudio) throw new OqmError("This video has no audio track, and silent-tail needs one. Add any audio (silence works) in your editor and export again.");
+
   let base: Blob = file;
   if (recipe.encode.reencode) base = await reencode(file, src, recipe.encode, onStage, signal, recipe.method === "silent-tail");
   else if (!(await isPatchReady(file))) base = await remux(file, onStage, signal);
@@ -337,17 +316,4 @@ export async function convert(
   };
 }
 
-/** Prepare once, then use these identical encoded packets for all comparison arms. */
-export async function prepareComparison(file: File, encode: EncodeOptions, onStage: (s: Stage) => void, signal?: AbortSignal): Promise<File> {
-  const src = await probe(file);
-  if (src.hdr) throw new OqmError("Use an SDR master. HDR is a separate test.");
-  const base = encode.reencode ? await reencode(file, src, encode, onStage, signal, true) : await remux(file, onStage, signal);
-  if (signal?.aborted) throw new OqmError("Stopped.");
-  return new File([base], file.name.replace(/\.[^.]+$/, "") + "_shared.mp4", { type: "video/mp4" });
-}
-export const COMPARISON_PRESETS: Preset[] = [
-  { id: "clean", title: "A: Clean MP4", desc: "Shared encoded source, normal container.", recipe: withPatches(["faststart"], { reencode: false }) },
-  { id: "current", title: "B: Current OQM", desc: "Shared encoded source, current full patch set.", recipe: withPatches(REFERENCE, { reencode: false }) },
-  { id: "silent-tail", title: "C: Silent-tail", desc: "Shared encoded source, experimental silent-tail only.", recipe: { ...withPatches([], { reencode: false }), method: "silent-tail" } },
-];
 export { OqmError };

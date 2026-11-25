@@ -3,16 +3,12 @@
 import { analyticsRunId, trackConversion } from "@/lib/conversion-analytics";
 import { canEncodeVideo } from "mediabunny";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MethodBranches } from "@/components/EditFigures";
 import SettingHelp from "@/components/SettingHelp";
-import { CATALOG, DEFAULT_PATCH, type Check, type PatchId } from "@/lib/oqm/patch";
+import { type Check } from "@/lib/oqm/patch";
 import {
   DEFAULT_RECIPE,
   sameRecipe,
-  COMPARISON_PRESETS,
-  prepareComparison,
   OqmError,
-  PRESETS,
   convert,
   type ConvertResult,
   type EncodeOptions,
@@ -24,11 +20,7 @@ type Run = {
   analyticsId: string;
   id: number;
   file: File;
-  title: string;
-  slug: string;
   recipe: Recipe;
-  group: number;
-  comparisonEncode?: EncodeOptions;
   status: "queued" | "running" | "done" | "error";
   stage?: Stage;
   result?: ConvertResult;
@@ -41,8 +33,9 @@ const STORE = "oqm-recipe-v1";
 function loadRecipe(): Recipe {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE) ?? "null");
-    if (saved?.encode && saved?.patch) {
-      return { encode: { ...DEFAULT_RECIPE.encode, ...saved.encode }, patch: { ...DEFAULT_PATCH, ...saved.patch }, ...(saved.method === "silent-tail" ? { method: "silent-tail" as const } : {}) };
+    // Settings saved for a retired method start over, so no one is left on an option they can't see.
+    if (saved?.method === "silent-tail" && saved.encode) {
+      return { ...DEFAULT_RECIPE, encode: { ...DEFAULT_RECIPE.encode, ...saved.encode } };
     }
   } catch {}
   return DEFAULT_RECIPE;
@@ -62,7 +55,9 @@ function formatSize(bytes: number) {
 const stem = (name: string) => name.replace(/\.[^.]+$/, "");
 
 let nextId = 1;
-let nextGroup = 1;
+
+/** The only website method, so analytics records just whether its settings were changed. */
+const presetFor = (recipe: Recipe) => (sameRecipe(DEFAULT_RECIPE, recipe) ? "silent-tail" : "custom");
 
 export default function Converter({
   file = null,
@@ -86,7 +81,6 @@ export default function Converter({
   const [dropping, setDropping] = useState(false);
   const runsRef = useRef<Run[]>([]);
   const busy = useRef(false);
-  const sharedSources = useRef(new Map<number, Promise<File>>());
   const abort = useRef<AbortController | null>(null);
   const counted = useRef(new Set<number>());
   const closed = useRef(false);
@@ -97,7 +91,6 @@ export default function Converter({
     saveRecipe(next);
   };
   const setEncode = (patch: Partial<EncodeOptions>) => setRecipe({ ...recipe, encode: { ...recipe.encode, ...patch } });
-  const setPatch = (patch: Partial<Recipe["patch"]>) => setRecipe({ ...recipe, patch: { ...recipe.patch, ...patch } });
 
   const update = useCallback((id: number, change: Partial<Run>) => {
     runsRef.current = runsRef.current.map((r) => (r.id === id ? { ...r, ...change } : r));
@@ -105,10 +98,10 @@ export default function Converter({
   }, []);
 
   const count = useCallback(
-    (run: Run, mode: "single" | "ab") => {
+    (run: Run) => {
       if (counted.current.has(run.id)) return;
       counted.current.add(run.id);
-      fetch("/api/conversion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) })
+      fetch("/api/conversion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "single" }) })
         .then((r) => r.json())
         .then((d) => typeof d.count === "number" && onCounted?.(d.count))
         .catch(() => {});
@@ -128,23 +121,14 @@ export default function Converter({
         abort.current = controller;
         update(run.id, { status: "running", stage: { label: "Starting", progress: null } });
         const startedAt = performance.now();
-        const analyticsPreset = (run.comparisonEncode ? COMPARISON_PRESETS : PRESETS).find(p => sameRecipe(p.recipe, run.recipe))?.id ?? "custom";
+        const analyticsPreset = presetFor(run.recipe);
         trackConversion(run, "started", analyticsPreset);
         try {
-          let source = run.file;
-          if (run.comparisonEncode) {
-            if (!sharedSources.current.has(run.group)) {
-              sharedSources.current.set(run.group, prepareComparison(run.file, run.comparisonEncode,
-                (stage) => update(run.id, { stage: { ...stage, label: `Shared source: ${stage.label}` } }), controller.signal));
-            }
-            source = await sharedSources.current.get(run.group)!;
-          }
-          const result = await convert(source, run.recipe, (stage) => update(run.id, { stage }), controller.signal);
+          const result = await convert(run.file, run.recipe, (stage) => update(run.id, { stage }), controller.signal);
           if (closed.current || controller.signal.aborted) throw new OqmError("Stopped.");
           trackConversion({ ...run, result }, result.checks.every(c => c.ok || c.warn) ? "succeeded" : "check_failed", analyticsPreset, performance.now() - startedAt);
           update(run.id, { status: "done", result, url: URL.createObjectURL(result.blob) });
-          const groupSize = runsRef.current.filter((r) => r.group === run.group).length;
-          if (result.checks.every((check) => check.ok || check.warn)) count(run, groupSize > 1 ? "ab" : "single");
+          if (result.checks.every((check) => check.ok || check.warn)) count(run);
         } catch (error) {
           trackConversion(run, controller.signal.aborted ? "cancelled" : "failed", analyticsPreset, performance.now() - startedAt, error);
           const message = controller.signal.aborted
@@ -155,7 +139,6 @@ export default function Converter({
           update(run.id, { status: "error", error: message });
           if (!(error instanceof OqmError) && !controller.signal.aborted) console.error(error);
         }
-        if (!runsRef.current.some(r => r.group === run.group && r.status === "queued")) sharedSources.current.delete(run.group);
       }
     } finally {
       busy.current = false;
@@ -165,22 +148,15 @@ export default function Converter({
   }, [count, update, onBusyChange]);
 
   const queue = useCallback(
-    (f: File, items: { title: string; slug: string; recipe: Recipe }[], comparisonEncode?: EncodeOptions) => {
+    (f: File, recipe: Recipe) => {
       if (closed.current) return;
-      const group = nextGroup++;
-      const fresh = items.map((item) => ({ ...item, analyticsId: analyticsRunId(), id: nextId++, file: f, group, comparisonEncode, status: "queued" as const }));
-      runsRef.current = [...fresh, ...runsRef.current];
+      const fresh: Run = { analyticsId: analyticsRunId(), id: nextId++, file: f, recipe, status: "queued" };
+      runsRef.current = [fresh, ...runsRef.current];
       setRuns(runsRef.current);
       void pump();
     },
     [pump],
   );
-
-  const titleFor = (r: Recipe) => PRESETS.find((p) => sameRecipe(p.recipe, r))?.title ?? "Custom settings";
-  const slugFor = (r: Recipe) => {
-    const preset = PRESETS.find((p) => sameRecipe(p.recipe, r));
-    return preset ? (preset.id === "current" ? "oqm" : `oqm-${preset.id}`) : "oqm-custom";
-  };
 
   // Selecting a file only stages it. Patching starts from an explicit action.
   useEffect(() => {
@@ -219,14 +195,12 @@ export default function Converter({
   useEffect(
     () => {
       closed.current = false;
-      const sources = sharedSources.current;
       const countedRuns = counted.current;
       return () => {
         closed.current = true;
         abort.current?.abort();
         for (const r of runsRef.current) if (r.url) URL.revokeObjectURL(r.url);
         runsRef.current = [];
-        sources.clear();
         countedRuns.clear();
       };
     },
@@ -238,18 +212,7 @@ export default function Converter({
   const activeFile = selectedFile;
   const latestSelectionRun = runs.find(r => r.file === activeFile);
   const selectionWasPatched = latestSelectionRun?.status === "done" && sameRecipe(latestSelectionRun.recipe, recipe);
-  const selectedPreset = PRESETS.find((p) => sameRecipe(p.recipe, recipe));
-  const presetId = selectedPreset?.id ?? "custom";
   const e = recipe.encode;
-  const enabled = new Set(recipe.patch.enabled);
-
-  const togglePatch = (id: PatchId) => {
-    if (id === "faststart") return;
-    const next = new Set(enabled);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setPatch({ enabled: CATALOG.map((c) => c.id).filter((c) => next.has(c)) });
-  };
 
   const onPick = (f: File | undefined) => {
     if (f) setSelectedFile(f);
@@ -310,23 +273,7 @@ export default function Converter({
 
         <section className="studio-side">
           <h2>Output settings</h2>
-          <div className="preset-control">
-            <label>
-              Preset
-              <select
-                value={presetId}
-                onChange={(ev) => {
-                  const preset = PRESETS.find((p) => p.id === ev.target.value);
-                  if (preset) setRecipe(preset.recipe);
-                }}
-              >
-                {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
-                {presetId === "custom" && <option value="custom" disabled>Custom settings</option>}
-              </select>
-            </label>
-            {selectedPreset && <p className="fine preset-description">{selectedPreset.desc}</p>}
-          </div>
-
+          <p className="fine preset-description">Method: <b>Silent-tail (default)</b></p>
           <div className="basic-settings adv">
             <fieldset>
               <legend className="sr-only">Basic output settings</legend>
@@ -335,7 +282,7 @@ export default function Converter({
                   <input type="checkbox" checked={e.reencode} onChange={(ev) => setEncode({ reencode: ev.target.checked })} />
                   Re-encode before patching
                 </label>
-                <SettingHelp label="Re-encode before patching">Rebuild video and audio using the settings below. Turn this off to keep the original streams and patch only the container.</SettingHelp>
+                <SettingHelp label="Re-encode before patching">Rebuild video and audio using the settings below. Turn this off to keep the original streams; the file must already be an MP4 with AAC-LC stereo audio.</SettingHelp>
               </div>
               {!e.reencode && <p className="fine">The patch uses your existing video and audio streams. Output encoding settings are inactive.</p>}
               <div className={`grid basic-grid${e.reencode ? "" : " off"}`}>
@@ -443,111 +390,16 @@ export default function Converter({
             </div>
           </details>
 
-          {recipe.method === "silent-tail" ? (
-            <details className="settings-section settings-experimental">
-              <summary><span>Silent-tail method</span><span className="section-meta">Experimental</span></summary>
-              <div className="settings-body">
-                <p className="fine">Silent-tail runs independently of the current patches. It changes audio sample descriptions,
-                  appends about 0.35 seconds of AAC silence and adds an audio track. Video packets stay unchanged.
-                  TikTok quality and retention are unverified.</p>
-              </div>
-            </details>
-          ) : <>
-          <details className="settings-section settings-patches">
-            <summary>
-              <span>Container patches</span>
-              <span className="section-meta">{enabled.size} active</span>
-            </summary>
-            <div className="settings-body adv">
-              <fieldset>
-                <legend className="sr-only">Container patches</legend>
-                <ul className="patch-list">
-                  {CATALOG.map((p) => (
-                    <li key={p.id}>
-                      <div className="setting-check">
-                        <label className="row">
-                          <input type="checkbox" checked={enabled.has(p.id)} disabled={p.id === "faststart"} onChange={() => togglePatch(p.id)} />
-                          {p.title}
-                        </label>
-                        <SettingHelp label={p.title}>{p.summary}</SettingHelp>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </fieldset>
-            </div>
-          </details>
-
-          <details className="settings-section settings-advanced">
-            <summary>
-              <span>Decoy &amp; metadata</span>
-              <span className="section-meta">Decoy, tags &amp; padding</span>
-            </summary>
-            <div className="settings-body adv">
-              <fieldset>
-                <legend className="sr-only">Advanced patch options</legend>
-                <div className="grid">
-                  <div className="setting-field">
-                    <span className="setting-title"><label htmlFor="setting-inflate">Decoy inflate (x samples)</label><SettingHelp label="Decoy inflate (x samples)">Multiplier for dummy samples in the hidden decoy track.</SettingHelp></span>
-                    <input id="setting-inflate"
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={recipe.patch.inflate}
-                      onChange={(ev) => setPatch({ inflate: Math.min(100, Math.max(1, Math.round(Number(ev.target.value)) || 1)) })}
-                    />
-                  </div>
-                  <div className="setting-field">
-                    <span className="setting-title"><label htmlFor="setting-dummy">Dummy sample bytes</label><SettingHelp label="Dummy sample bytes">Bytes per dummy sample. Leave blank to choose automatically.</SettingHelp></span>
-                    <input id="setting-dummy"
-                      type="number"
-                      min={0}
-                      max={64}
-                      placeholder="auto"
-                      value={recipe.patch.dummySize ?? ""}
-                      onChange={(ev) => setPatch({ dummySize: ev.target.value ? Math.min(64, Math.max(1, Math.round(Number(ev.target.value)))) : null })}
-                    />
-                  </div>
-                  <div className="setting-field">
-                    <span className="setting-title"><label htmlFor="setting-tag">Encoder tag</label><SettingHelp label="Encoder tag">Encoder metadata written when the Clean metadata patch is enabled.</SettingHelp></span>
-                    <input id="setting-tag" type="text" maxLength={64} value={recipe.patch.encoderTag} onChange={(ev) => setPatch({ encoderTag: ev.target.value })} />
-                  </div>
-                  <div className="setting-field">
-                    <span className="setting-title"><label htmlFor="setting-padding">Trailing pad bytes</label><SettingHelp label="Trailing pad bytes">Padding appended after media data when the Trailing padding patch is enabled.</SettingHelp></span>
-                    <input id="setting-padding"
-                      type="number"
-                      min={8}
-                      max={10_000_000}
-                      step={4}
-                      value={recipe.patch.trailingBytes}
-                      onChange={(ev) => setPatch({ trailingBytes: Math.min(10_000_000, Math.max(8, Math.round(Number(ev.target.value)) || 8)) })}
-                    />
-                  </div>
-                </div>
-              </fieldset>
-            </div>
-          </details>
-          </>}
-
           <details className="settings-section settings-tools">
-            <summary><span>Tools &amp; help</span><span className="section-meta">Comparisons &amp; tips</span></summary>
+            <summary><span>Tools &amp; help</span><span className="section-meta">How it works</span></summary>
             <div className="settings-body studio-tools">
-              <MethodBranches/>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={!activeFile}
-                onClick={() => activeFile && queue(activeFile, COMPARISON_PRESETS.map((p) => ({ title: p.title, slug: `compare-${p.id}`, recipe: p.recipe })), { ...recipe.encode })}
-                title="Prepares one shared source, then builds clean MP4, current OQM and silent-tail without further encoding"
-              >
-                Make local comparison ({COMPARISON_PRESETS.length})
-              </button>
-              {!activeFile && <p className="fine">Choose a video to compare clean MP4, current OQM and silent-tail.</p>}
+              <p className="fine">Silent-tail appends about 0.35 seconds of AAC silence and adds an audio track. Patching leaves
+                the encoded video unchanged. TikTok quality and retention can vary.</p>
               <details className="tip">
                 <summary>How to tell if it worked</summary>
                 <p>
-                  Local checks cover file integrity only. Start with the same 1080p60 SDR source. Compare clean MP4, current OQM
-                  and silent-tail after processing, then at 24 hours, 72 hours and seven days on desktop and a second phone/account.
+                  Local checks cover file integrity only. Start with the same 1080p60 SDR source. Check your post
+                  after processing, then at 24 hours, 72 hours and seven days on desktop and a second phone/account.
                   Check every accessible rendition and its frame rate. A quality label alone does not prove unchanged video.
                   Test 4K next; keep 120 fps and HDR in separate rounds.
                 </p>
@@ -568,13 +420,13 @@ export default function Converter({
           </div>
         </section>
         <div className="patch-controls">
-          <p>{current ? `Patching ${current.title}. Keep this page open.` : selectionWasPatched ? "Download your MP4 below." : activeFile ? "Ready to patch." : "Choose a video to start patching."}</p>
+          <p>{current ? "Patching your video. Keep this page open." : selectionWasPatched ? "Download your MP4 below." : activeFile ? "Ready to patch." : "Choose a video to start patching."}</p>
           {current ? <button type="button" className="btn btn-secondary" onClick={() => abort.current?.abort()}>Stop patching</button> : (
             <button
               type="button"
               className={selectionWasPatched ? "btn btn-secondary" : "sun-action"}
               disabled={!activeFile}
-              onClick={() => activeFile && queue(activeFile, [{ title: titleFor(recipe), slug: slugFor(recipe), recipe }])}
+              onClick={() => activeFile && queue(activeFile, recipe)}
             >
               {selectionWasPatched ? "Start again" : "Start patching"}
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
@@ -595,12 +447,12 @@ export default function Converter({
 }
 
 function RunCard({ run, showFile }: { run: Run; showFile: boolean }) {
-  const outName = `${stem(run.file.name)}_${run.slug}.mp4`;
+  const outName = `${stem(run.file.name)}_oqm-silent-tail.mp4`;
   const hard = run.result?.checks.filter((c) => !c.ok && !c.warn) ?? [];
   return (
     <li className={`run run-${run.error === "Stopped." ? "stopped" : run.status}`}>
       <div className="run-head">
-        <b>{run.title}</b>
+        <b>Silent-tail</b>
         {showFile && <span className="run-file">{run.file.name}</span>}
         {run.status === "queued" && <span className="run-tag">waiting</span>}
       </div>
@@ -622,10 +474,10 @@ function RunCard({ run, showFile }: { run: Run; showFile: boolean }) {
           <div className="run-meta">
             {run.result.info.width} × {run.result.info.height} · {Math.round(run.result.info.fps * 100) / 100} fps · {run.result.info.mbps.toFixed(1)} Mbps ·{" "}
             {formatSize(run.result.blob.size)}
-            {run.comparisonEncode ? (run.comparisonEncode.reencode ? " · shared source encoded once" : " · shared source, no re-encode") : run.result.info.reencoded ? "" : " · not re-encoded"}
+            {run.result.info.reencoded ? "" : " · not re-encoded"}
           </div>
           <div className="run-row">
-            <a className="sun-action" href={run.url} download={outName} onClick={() => trackConversion(run, "downloaded", (run.comparisonEncode ? COMPARISON_PRESETS : PRESETS).find(p => sameRecipe(p.recipe, run.recipe))?.id ?? "custom")}>
+            <a className="sun-action" href={run.url} download={outName} onClick={() => trackConversion(run, "downloaded", presetFor(run.recipe))}>
               Download MP4
             </a>
             <span className={hard.length ? "run-bad" : "run-ok"}>{hard.length ? `${hard.length} check(s) failed` : <><span aria-hidden="true">✓ </span>Local checks passed</>}</span>

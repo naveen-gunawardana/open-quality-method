@@ -24,7 +24,7 @@ export const siteStructuredData = {
     { "@type": "WebApplication", "@id": `${SITE_URL}/#app`, name: "Open Quality Method", alternateName: "OQM", url: `${SITE_URL}/`,
       description: SITE_DESCRIPTION, applicationCategory: "MultimediaApplication", operatingSystem: "Web browser",
       isAccessibleForFree: true, offers: { "@type": "Offer", price: "0", priceCurrency: "USD", url: `${SITE_URL}/convert` },
-      featureList: ["Local video processing", "Video container patching", "H.264/AAC conversion", "MP4 and supported MOV input", "1080p and 4K output presets"],
+      featureList: ["Local video processing", "Video container patching", "H.264/AAC conversion", "MP4 and supported MOV input", "1080p and 4K output"],
       sameAs: ["https://github.com/naveen-gunawardana/open-quality-method"],
     },
   ],

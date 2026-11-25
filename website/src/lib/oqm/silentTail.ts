@@ -107,7 +107,7 @@ function audioDescription(stsd: Box) {
 
 export async function silentTail(file: Blob): Promise<PatchResult> {
   try { return await patchSilentTail(file); }
-  catch (error) { if (error instanceof OqmError) throw error; throw new OqmError("Silent-tail: unsupported or malformed MP4. Use the current recipe or a clean AAC-LC stereo export."); }
+  catch (error) { if (error instanceof OqmError) throw error; throw new OqmError("Silent-tail: unsupported or malformed MP4. Turn on Re-encode before patching, or use a clean AAC-LC stereo export."); }
 }
 
 async function patchSilentTail(file: Blob): Promise<PatchResult> {

@@ -39,9 +39,9 @@ test('every guide has a distinct static share card at the advertised dimensions'
 });
 test('the downloadable worksheet covers all variants and retention checkpoints',async()=>{
   const lines=(await readFile(path.join(root,'public/resources/tiktok-upload-test.csv'),'utf8')).trim().split(/\r?\n/).map(x=>x.split(','));
-  assert.equal(lines.length,13);assert.ok(lines.every(row=>row.length===9));
+  assert.equal(lines.length,9);assert.ok(lines.every(row=>row.length===9));
   assert.equal(lines[0][0],'variant');
-  for(const variant of ['Clean MP4','Original OQM','Silent-tail'])assert.deepEqual(lines.slice(1).filter(r=>r[0]===variant).map(r=>r[1]),['After processing','24 hours','72 hours','7 days']);
+  for(const variant of ['Clean MP4','Silent-tail'])assert.deepEqual(lines.slice(1).filter(r=>r[0]===variant).map(r=>r[1]),['After processing','24 hours','72 hours','7 days']);
 });
 
 test('every guide CTA uses campaign tags the analytics endpoint will retain',async()=>{

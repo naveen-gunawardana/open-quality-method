@@ -6,7 +6,7 @@ const descriptions: Record<GuideIllustration,string> = {
   workflow: "Follow one edit from your source file to the local MP4. Check the posted rendition separately.",
   container: "Example MOV input. OQM can decode supported ProRes and prepare H.264 video and AAC audio for the patched MP4.",
   "audio-tail": "Simplified timeline. The tail is enlarged here so you can see it. The encoded video keeps its original length.",
-  dimensions: "Portrait examples with the 1080p preset. It caps the shorter edge and preserves a smaller source.",
+  dimensions: "Portrait examples with Max 1080p. It caps the shorter edge and preserves a smaller source.",
   playback: "Illustrative inspection points. Compare the same moment in your preview, export and served rendition to locate the first loss of detail.",
   cadence: "One tenth of a second of genuine motion. The dots mark three source frames at 30 fps and six at 60 fps.",
   errors: "The stage named in the error tells you which part of the workflow to troubleshoot.",
